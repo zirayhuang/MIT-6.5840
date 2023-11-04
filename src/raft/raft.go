@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 
@@ -117,12 +120,14 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
+
 }
 
 // restore previously persisted state.
@@ -132,17 +137,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		log.Fatalf("Node %v: Failed to read persistent state \n", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+		fmt.Printf("Node %v: Read persist state, ct = %v, votedFor = %v, logs = %v\n", rf.me, currentTerm, votedFor, logs)
+	}
 }
 
 // Snapshot the service says it has created a snapshot that has
@@ -182,8 +190,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 // RequestVote example RequestVote RPC handler.
@@ -210,6 +220,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.currentTerm = args.Term
 	rf.changeState(Follower)
+	rf.persist()
 
 	// 5.4
 	lastLogIndex := len(rf.logs)
@@ -220,23 +231,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// First, compare the term of the last log entry
 	if lastLogTerm > args.LastLogTerm {
-		//fmt.Printf("Node %v: reject vote from %v because args.lastLogTerm = %v and my lastLogTerm = %v \n",
-		//	rf.me, args.CandidateId, args.LastLogTerm, lastLogTerm)
+		fmt.Printf("Node %v: reject vote from %v because args.lastLogTerm = %v and my lastLogTerm = %v \n",
+			rf.me, args.CandidateId, args.LastLogTerm, lastLogTerm)
 		return
 	}
 
 	// If the terms are the same, then compare the length of the log
 	if lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
-		//fmt.Printf("Node %v: reject vote from %v because args.lastLogIndex = %v and my lastLogIndex = %v \n",
-		//	rf.me, args.CandidateId, args.LastLogIndex, lastLogIndex)
+		fmt.Printf("Node %v: reject vote from %v because args.lastLogIndex = %v and my lastLogIndex = %v \n",
+			rf.me, args.CandidateId, args.LastLogIndex, lastLogIndex)
 		return
 	}
 
 	// if args.Term > rf.currentTerm || hasn't vote
 	rf.votedFor = args.CandidateId
 	reply.VoteGranted = true
+	rf.persist()
 	rf.resetTimeout()
-	//fmt.Printf("Node %v : Grant vote for Node %v, ReTerm = %v, MyTerm = %v \n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+	//fmt.Printf("Node %v: Grant vote for Node %v, ReTerm = %v, MyTerm = %v \n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+	//fmt.Printf("Node %v: while granting, my lastLogTerm = %v, lastLogIndex = %v\n", rf.me, lastLogTerm, lastLogIndex)
 	return
 }
 
@@ -268,7 +281,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check if PrevLogIndex matches
 	adjustedIndex := args.PrevLogIndex - 1
 	if adjustedIndex >= 0 && (adjustedIndex >= len(rf.logs) || rf.logs[adjustedIndex].Term != args.PrevLogTerm) {
-		//fmt.Printf("Node %v: Reject received AppendEntries from node %v with Term %v, No PrevIndex = %v \n", rf.me, args.LeaderId, args.Term, args.PrevLogIndex)
+		// Optimization
+		if adjustedIndex >= len(rf.logs) {
+			//fmt.Printf("Node %v: Reject received AppendEntries from node %v with Term %v, No PrevIndex = %v, conflictIndec = %v \n", rf.me, args.LeaderId, args.Term, args.PrevLogIndex, len(rf.logs))
+			reply.ConflictIndex = len(rf.logs)
+			return
+		}
+		if rf.logs[adjustedIndex].Term != args.PrevLogTerm {
+			//fmt.Printf("Node %v: Reject received AppendEntries from node %v with Term %v, PrevLogTerm not match = %v:%v \n", rf.me, args.LeaderId, args.Term, args.PrevLogTerm, rf.logs[adjustedIndex].Term)
+			reply.ConflictTerm = rf.logs[adjustedIndex].Term
+			for _, entry := range rf.logs {
+				if entry.Term == reply.ConflictTerm {
+					reply.ConflictIndex = entry.Index
+					//fmt.Printf("Node %v: Reject received AppendEntries, conflict index = %v\n", rf.me, reply.ConflictIndex)
+					return
+				}
+			}
+		}
 		return
 	}
 
@@ -294,7 +323,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range args.Entries {
 		if entry.Index > len(rf.logs) {
 			rf.logs = append(rf.logs, args.Entries[i:]...)
-			fmt.Printf("Node %v: append %v entries to %v\n", rf.me, len(args.Entries)-i, rf.logs)
+			//fmt.Printf("Node %v: append %v entries to %v\n", rf.me, len(args.Entries)-i, rf.logs)
 			break
 		}
 	}
@@ -303,7 +332,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//fmt.Printf("Node %v: args.LC = %v, myC =%v myLastEntry = %v \n", rf.me, args.LeaderCommit, rf.commitIndex, len(rf.logs))
 		lastCommit := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
-		fmt.Printf("Node %v: update commitIndex to %v from lastCommit %v \n", rf.me, rf.commitIndex, lastCommit)
+		//fmt.Printf("Node %v: update commitIndex to %v from lastCommit %v \n", rf.me, rf.commitIndex, lastCommit)
 		for i := lastCommit; i < rf.commitIndex; i++ {
 			rf.applyCh <- ApplyMsg{Command: rf.logs[i].Command, CommandIndex: i + 1, CommandValid: true}
 			//fmt.Printf("Node %v: %v \n", rf.me, rf.logs)
@@ -315,6 +344,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	rf.changeState(Follower)
+	rf.persist()
 	return
 }
 
@@ -379,7 +409,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := len(rf.logs) + 1
 
 	rf.logs = append(rf.logs, LogEntry{Index: index, Term: term, Command: command})
-
+	rf.persist()
 	rf.mu.Unlock()
 
 	//fmt.Printf("Node %v: Leader received Start Command, start update followers entry, logs = %v \n", rf.me, rf.logs)
@@ -408,7 +438,7 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		ms := 150 + (rand.Int63() % 300)
+		ms := 250 + (rand.Int63() % 150)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		select {
 		case <-rf.resetCh: // Reset the timeout if a Command is received on the reset channel
@@ -451,7 +481,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	// initialize from state persisted before a crash
+	rf.mu.Lock()
 	rf.readPersist(persister.ReadRaftState())
+	rf.mu.Unlock()
 	return rf
 }
 
@@ -488,6 +520,7 @@ func (rf *Raft) startElection() {
 			rf.currentTerm = reply.Term
 			rf.changeState(Follower)
 			rf.votedFor = -1
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -517,6 +550,7 @@ func (rf *Raft) startElection() {
 	} else {
 		fmt.Printf("Node %v: Didn't get enough votes - %v, election failed. State = %v \n", rf.me, voteCount, rf.state)
 		rf.votedFor = -1
+		rf.persist()
 		rf.changeState(Follower)
 		rf.mu.Unlock()
 	}
@@ -552,7 +586,7 @@ func (rf *Raft) leaderHeartbeatLoop() {
 		rf.mu.Unlock()
 
 		rf.updateFollowerEntries()
-		time.Sleep(120 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -676,6 +710,7 @@ func (rf *Raft) updateEntry(peer int) {
 			rf.currentTerm = reply.Term
 			rf.changeState(Follower)
 			rf.votedFor = -1
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -699,7 +734,35 @@ func (rf *Raft) updateEntry(peer int) {
 		} else {
 			fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer]-1)
 			if rf.nextIndex[peer] == nextIndex {
-				rf.nextIndex[peer] = rf.nextIndex[peer] - 1
+				//rf.nextIndex[peer] = rf.nextIndex[peer] - 1
+				// Optimization
+
+				if reply.ConflictTerm == 0 {
+					rf.nextIndex[peer] = 1
+					fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
+				} else {
+					findConflictTerm := false
+					for _, entry := range rf.logs {
+						if entry.Term == reply.ConflictTerm {
+							findConflictTerm = true
+							break
+						}
+					}
+
+					if findConflictTerm == true {
+						for _, entry := range rf.logs {
+							if entry.Term > reply.ConflictTerm {
+								rf.nextIndex[peer] = entry.Index
+								fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
+								break
+							}
+						}
+						fmt.Printf("Node %v: reaching here: No!\n", rf.me)
+					} else {
+						rf.nextIndex[peer] = reply.ConflictIndex
+						fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
+					}
+				}
 			}
 			rf.mu.Unlock()
 			time.Sleep(20 * time.Millisecond)
