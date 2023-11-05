@@ -149,7 +149,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
-		fmt.Printf("Node %v: Read persist state, ct = %v, votedFor = %v, logs = %v\n", rf.me, currentTerm, votedFor, logs)
+		//fmt.Printf("Node %v: Read persist state, ct = %v, votedFor = %v, logs = %v\n", rf.me, currentTerm, votedFor, logs)
 	}
 }
 
@@ -231,15 +231,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// First, compare the term of the last log entry
 	if lastLogTerm > args.LastLogTerm {
-		fmt.Printf("Node %v: reject vote from %v because args.lastLogTerm = %v and my lastLogTerm = %v \n",
-			rf.me, args.CandidateId, args.LastLogTerm, lastLogTerm)
+		//fmt.Printf("Node %v: reject vote from %v because args.lastLogTerm = %v and my lastLogTerm = %v \n",
+		//	rf.me, args.CandidateId, args.LastLogTerm, lastLogTerm)
 		return
 	}
 
 	// If the terms are the same, then compare the length of the log
 	if lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
-		fmt.Printf("Node %v: reject vote from %v because args.lastLogIndex = %v and my lastLogIndex = %v \n",
-			rf.me, args.CandidateId, args.LastLogIndex, lastLogIndex)
+		//fmt.Printf("Node %v: reject vote from %v because args.lastLogIndex = %v and my lastLogIndex = %v \n",
+		//	rf.me, args.CandidateId, args.LastLogIndex, lastLogIndex)
 		return
 	}
 
@@ -256,25 +256,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// heartbeat
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm {
-		fmt.Printf("Node %v: Reject received AppendEntries from node %v with Term %v, my term = %v \n", rf.me, args.LeaderId, args.Term, rf.currentTerm)
+		//fmt.Printf("Node %v: Reject received AppendEntries from node %v with Term %v, my term = %v \n", rf.me, args.LeaderId, args.Term, rf.currentTerm)
+		rf.mu.Unlock()
 		return
 	}
 
 	rf.resetTimeout()
 
 	if rf.state == Candidate {
-		fmt.Printf("Node %v: candidate become follower because of receive vote reqeust from %v", rf.me, args.LeaderId)
+		//fmt.Printf("Node %v: candidate become follower because of receive vote reqeust from %v", rf.me, args.LeaderId)
 		rf.changeState(Follower)
 		rf.votedFor = -1
 	}
 
 	if rf.state == Leader && args.Entries == nil {
-		fmt.Printf("Node %v: leader receive empty heartbeat reqeust from, wait for update %v", rf.me, args.LeaderId)
+		//fmt.Printf("Node %v: leader receive empty heartbeat reqeust from, wait for update %v", rf.me, args.LeaderId)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -285,6 +286,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if adjustedIndex >= len(rf.logs) {
 			//fmt.Printf("Node %v: Reject received AppendEntries from node %v with Term %v, No PrevIndex = %v, conflictIndec = %v \n", rf.me, args.LeaderId, args.Term, args.PrevLogIndex, len(rf.logs))
 			reply.ConflictIndex = len(rf.logs)
+			rf.mu.Unlock()
 			return
 		}
 		if rf.logs[adjustedIndex].Term != args.PrevLogTerm {
@@ -294,10 +296,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if entry.Term == reply.ConflictTerm {
 					reply.ConflictIndex = entry.Index
 					//fmt.Printf("Node %v: Reject received AppendEntries, conflict index = %v\n", rf.me, reply.ConflictIndex)
+					rf.mu.Unlock()
 					return
 				}
 			}
 		}
+		rf.mu.Unlock()
 		return
 	}
 
@@ -328,16 +332,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	//toApply := make([]ApplyMsg, 0)
 	if args.LeaderCommit > rf.commitIndex {
 		//fmt.Printf("Node %v: args.LC = %v, myC =%v myLastEntry = %v \n", rf.me, args.LeaderCommit, rf.commitIndex, len(rf.logs))
-		lastCommit := rf.commitIndex
+		//lastCommit := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
 		//fmt.Printf("Node %v: update commitIndex to %v from lastCommit %v \n", rf.me, rf.commitIndex, lastCommit)
-		for i := lastCommit; i < rf.commitIndex; i++ {
-			rf.applyCh <- ApplyMsg{Command: rf.logs[i].Command, CommandIndex: i + 1, CommandValid: true}
-			//fmt.Printf("Node %v: %v \n", rf.me, rf.logs)
-			//fmt.Printf("Node %v: Applied Message: %v\n", rf.me, i+1)
-		}
+		//for i := lastCommit; i < rf.commitIndex; i++ {
+		//	toApply = append(toApply, ApplyMsg{Command: rf.logs[i].Command, CommandIndex: i + 1, CommandValid: true})
+		//}
 	}
 
 	rf.currentTerm = args.Term
@@ -345,6 +348,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	rf.changeState(Follower)
 	rf.persist()
+
+	if rf.commitIndex > rf.lastApplied {
+		entries := append([]LogEntry{}, rf.logs[rf.lastApplied:rf.commitIndex]...)
+		go func(entries []LogEntry) {
+			for _, entry := range entries {
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Command,
+					CommandIndex: entry.Index,
+				}
+				rf.applyCh <- msg
+
+				rf.mu.Lock()
+				if rf.lastApplied < msg.CommandIndex {
+					rf.lastApplied = msg.CommandIndex
+				}
+				rf.mu.Unlock()
+			}
+		}(entries)
+	}
+	rf.mu.Unlock()
 	return
 }
 
@@ -548,7 +572,9 @@ func (rf *Raft) startElection() {
 		rf.mu.Unlock()
 		go rf.leaderHeartbeatLoop()
 	} else {
-		fmt.Printf("Node %v: Didn't get enough votes - %v, election failed. State = %v \n", rf.me, voteCount, rf.state)
+		//fmt.Printf("Node %v: Didn't get enough votes - %v, election failed. State = %v \n", rf.me, voteCount, rf.state)
+		//fmt.Printf("Node %v: Vote failed, state = %v, currentTerm = %v, voteTerm = %v \n", rf.me, rf.state, rf.currentTerm, voteTerm)
+
 		rf.votedFor = -1
 		rf.persist()
 		rf.changeState(Follower)
@@ -569,7 +595,7 @@ func (rf *Raft) elect(server int, voteTerm int, lastLogIndex int, lastLogTerm in
 	reply := RequestVoteReply{}
 	ok := rf.sendRequestVote(server, &args, &reply)
 	if ok == false {
-		fmt.Printf("Node %v, Failed to invoke send Request Vote RPC call to %v \n", rf.me, server)
+		//fmt.Printf("Node %v, Failed to invoke send Request Vote RPC call to %v \n", rf.me, server)
 	}
 	ch <- reply
 }
@@ -615,6 +641,7 @@ func (rf *Raft) updateFollowerEntries() {
 func (rf *Raft) updateCommitIndex() {
 	if rf.state != Leader {
 		fmt.Printf("Node %v - No longer Leader, stop update commit index \n", rf.me)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -639,16 +666,41 @@ func (rf *Raft) updateCommitIndex() {
 	}
 
 	if committedTill > rf.commitIndex {
-		lastCommitted := rf.commitIndex
+		//lastCommitted := rf.commitIndex
 		rf.commitIndex = committedTill
-		fmt.Printf("Node %v: Leader Update committed log to %v \n", rf.me, committedTill)
-		for i := lastCommitted + 1; i <= committedTill; i++ {
-			rf.applyCh <- ApplyMsg{Command: rf.logs[i-1].Command, CommandIndex: i, CommandValid: true}
-			//fmt.Printf("Node %v: %v \n", rf.me, rf.logs)
-			//fmt.Printf("Node %v: Applied Message: %v \n", rf.me, i)
-		}
+		//fmt.Printf("Node %v: Leader Update committed log to %v \n", rf.me, committedTill)
+		//for i := lastCommitted + 1; i <= committedTill; i++ {
+		//	toApply = append(toApply, ApplyMsg{Command: rf.logs[i-1].Command, CommandIndex: i, CommandValid: true})
+		//
+		//}
 	}
 
+	//for rf.commitIndex > rf.lastApplied {
+	//	rf.lastApplied += 1
+	//	rf.applyCh <- ApplyMsg{Command: rf.logs[rf.lastApplied].Command, CommandIndex: rf.lastApplied, CommandValid: true}
+	//}
+
+	if rf.commitIndex > rf.lastApplied {
+		entries := append([]LogEntry{}, rf.logs[rf.lastApplied:rf.commitIndex]...)
+
+		go func(entries []LogEntry) {
+			for _, entry := range entries {
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Command,
+					CommandIndex: entry.Index,
+				}
+				rf.applyCh <- msg
+				rf.mu.Lock()
+				if rf.lastApplied < msg.CommandIndex {
+					rf.lastApplied = msg.CommandIndex
+					fmt.Printf("Node %v: update lastCommitted to %v\n", rf.me, rf.lastApplied)
+				}
+				rf.mu.Unlock()
+			}
+		}(entries)
+	}
+	rf.mu.Unlock()
 }
 
 func min(a, b int) int {
@@ -701,12 +753,12 @@ func (rf *Raft) updateEntry(peer int) {
 		reply := AppendEntriesReply{}
 		ok := rf.sendAppendEntries(peer, &args, &reply)
 		if ok == false {
-			fmt.Printf("Node %v: Failed to invoke Append Entries RPC call to %v\n", rf.me, peer)
+			//fmt.Printf("Node %v: Failed to invoke Append Entries RPC call to %v\n", rf.me, peer)
 			continue
 		}
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
-			fmt.Printf("Node %v: AE RPC to Node %v Failed because %v > %v, step down...\n", rf.me, peer, reply.Term, rf.currentTerm)
+			//fmt.Printf("Node %v: AE RPC to Node %v Failed because %v > %v, step down...\n", rf.me, peer, reply.Term, rf.currentTerm)
 			rf.currentTerm = reply.Term
 			rf.changeState(Follower)
 			rf.votedFor = -1
@@ -729,17 +781,16 @@ func (rf *Raft) updateEntry(peer int) {
 				}
 			}
 			rf.updateCommitIndex()
-			rf.mu.Unlock()
 			return
 		} else {
-			fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer]-1)
+			//fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer]-1)
 			if rf.nextIndex[peer] == nextIndex {
 				//rf.nextIndex[peer] = rf.nextIndex[peer] - 1
 				// Optimization
 
 				if reply.ConflictTerm == 0 {
 					rf.nextIndex[peer] = 1
-					fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
+					//fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
 				} else {
 					findConflictTerm := false
 					for _, entry := range rf.logs {
@@ -753,14 +804,14 @@ func (rf *Raft) updateEntry(peer int) {
 						for _, entry := range rf.logs {
 							if entry.Term > reply.ConflictTerm {
 								rf.nextIndex[peer] = entry.Index
-								fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
+								//fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
 								break
 							}
 						}
-						fmt.Printf("Node %v: reaching here: No!\n", rf.me)
+						//fmt.Printf("Node %v: reaching here: No!\n", rf.me)
 					} else {
 						rf.nextIndex[peer] = reply.ConflictIndex
-						fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
+						//fmt.Printf("Node %v: AE RPC to follower %v failed, decrement nextIndex to %v \n", rf.me, peer, rf.nextIndex[peer])
 					}
 				}
 			}
