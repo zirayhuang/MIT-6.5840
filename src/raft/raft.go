@@ -20,7 +20,6 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
-	"fmt"
 	"log"
 	"math/rand"
 	"time"
@@ -666,7 +665,7 @@ func (rf *Raft) updateFollowerEntries() {
 
 func (rf *Raft) updateCommitIndex() {
 	if rf.state != Leader {
-		fmt.Printf("Node %v - No longer Leader, stop update commit index \n", rf.me)
+		//fmt.Printf("Node %v - No longer Leader, stop update commit index \n", rf.me)
 		rf.mu.Unlock()
 		return
 	}
@@ -860,7 +859,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	//fmt.Printf("Node %v: received InstallSnapshot From node %v, lastIncludedIndex = %v, lastIncludedTerm = %v, my II = %v\n",
 	//	rf.me, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm, rf.lastIncludedIndex)
-
+	rf.resetTimeout()
 	if args.LastIncludedIndex > rf.lastIncludedIndex {
 		rf.lastIncludedIndex = args.LastIncludedIndex
 		rf.lastIncludedTerm = args.LastIncludedTerm
@@ -878,12 +877,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 				}
 			}
 		}
-		if rf.lastApplied < rf.lastIncludedIndex {
-			rf.lastApplied = rf.lastIncludedIndex
-		}
-		if rf.commitIndex < rf.lastIncludedIndex {
-			rf.commitIndex = rf.lastIncludedIndex
-		}
 		rf.snapshot = args.Data
 		rf.persist()
 
@@ -894,6 +887,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		snapApplyMsg.Snapshot = args.Data
 		rf.mu.Unlock()
 		rf.applyCh <- snapApplyMsg
+		rf.mu.Lock()
+
+		if rf.lastApplied < rf.lastIncludedIndex {
+			//fmt.Printf("Node %v: LI update to %v from installSP, logs = %v\n", rf.me, rf.lastIncludedIndex, rf.logs)
+			rf.lastApplied = rf.lastIncludedIndex
+		}
+		if rf.commitIndex < rf.lastIncludedIndex {
+			rf.commitIndex = rf.lastIncludedIndex
+		}
+
+		rf.mu.Unlock()
 	} else {
 		rf.mu.Unlock()
 	}
@@ -901,7 +905,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 func (rf *Raft) getLastLog() LogEntry {
 	if len(rf.logs) == 0 {
-		fmt.Printf("Node %v: logs len = 0 \n", rf.me)
+		//fmt.Printf("Node %v: logs len = 0 \n", rf.me)
 	}
 	return rf.logs[len(rf.logs)-1]
 }
@@ -911,6 +915,9 @@ func (rf *Raft) applyLoop() {
 		time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
+			if rf.lastApplied+1-rf.lastIncludedIndex < 0 {
+				//fmt.Printf("Node %v: ERROR. LA = %v, LI = %v, logs = %v\n", rf.me, rf.lastApplied, rf.lastIncludedIndex, rf.logs)
+			}
 			entries := rf.logs[rf.lastApplied+1-rf.lastIncludedIndex : rf.commitIndex+1-rf.lastIncludedIndex]
 			//fmt.Printf("Node %v: to be committed entries = %v, lastApplied=%v\n", rf.me, entries, rf.lastApplied)
 			rf.mu.Unlock()
