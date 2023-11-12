@@ -1,5 +1,6 @@
 # MIT 6.5840 Lab
-Each test has been executed 100 times consecutively without a single failure
+This code represents the implementation of the Raft consensus protocol in the MIT-6.5840 Distributed Systems lab. 
+Each test has been successfully executed 100 times in a row without any failures.
 ## Lab2A:
 
 ### Guidelines for Resetting votedFor to null
@@ -61,3 +62,9 @@ To address this, we can integrate the log truncation optimization strategy that 
 - If it does not find an entry with that term, it should set nextIndex = conflictIndex.
 
 Don't forget this: If conflictTerm = None, should set nextIndex[peer] to 1.
+
+## Lab2D
+- Implemented the InstallSnapshot RPC.
+- Introduced persistent variables: lastIncludedIndex, lastIncludedTerm, and snapshot.
+- When reading persisted data, initialize `lastApplied` and `committedIndex` to lastIncludedIndex.
+- To simplify entry indexing and access, introduced a dummy entry at the beginning of the logs.
