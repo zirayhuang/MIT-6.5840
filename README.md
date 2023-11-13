@@ -68,6 +68,5 @@ Don't forget this: If conflictTerm = None, should set nextIndex[peer] to 1.
 - Introduced persistent variables: lastIncludedIndex, lastIncludedTerm, and snapshot.
 - When reading persisted data, initialize `lastApplied` and `committedIndex` to lastIncludedIndex.
 - To simplify entry indexing and access, introduced a dummy entry at the beginning of the logs.
-- It's possible to get `apply out of order` issue, which is caused by snapshot apply.
-  - e.g. follower is behind, InstallSnapshot updates lastApplied[i] to 139, while there's a ongoing AppendEntries applies lower index.
-  - Is this acceptable?
+- The occurrence of the 'apply out of order' issue is possible, typically arising from snapshot application scenarios. For instance, when a follower is lagging behind, the InstallSnapshot operation updates lastApplied[i] to a certain value (e.g., 139), while there is an ongoing AppendEntries operation applying entries with a lower index. 
+  - To address this issue, a solution is to introduce an 'applier' mechanism that ensures the serialized application of entries and snapshots. This approach helps in coordinating and sequencing the application process, preventing conflicts that might arise from concurrent applications of entries and snapshots.

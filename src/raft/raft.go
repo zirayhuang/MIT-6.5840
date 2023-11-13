@@ -67,13 +67,15 @@ type LogEntry struct {
 
 // Raft A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's Index into peers[]
-	dead      int32               // set by Kill()
-	applyCh   chan ApplyMsg
-	resetCh   chan struct{}
+	mu              sync.Mutex          // Lock to protect shared access to this peer's state
+	peers           []*labrpc.ClientEnd // RPC end points of all peers
+	persister       *Persister          // Object to hold this peer's persisted state
+	me              int                 // this peer's Index into peers[]
+	dead            int32               // set by Kill()
+	applyCh         chan ApplyMsg
+	resetCh         chan struct{}
+	applyEntryCh    chan ApplyMsg
+	applySnapshotCh chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -523,6 +525,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.resetCh = make(chan struct{}, 1)
+	rf.applyEntryCh = make(chan ApplyMsg, 1)
+	rf.applySnapshotCh = make(chan ApplyMsg, 1)
 	rf.applyCh = applyCh
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -531,6 +535,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	go rf.ticker()
 	go rf.applyLoop()
+	go rf.applier()
 
 	// initialize from state persisted before a crash
 	rf.mu.Lock()
@@ -885,17 +890,20 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		snapApplyMsg.SnapshotIndex = args.LastIncludedIndex
 		snapApplyMsg.SnapshotTerm = args.LastIncludedTerm
 		snapApplyMsg.Snapshot = args.Data
-		rf.mu.Unlock()
-		rf.applyCh <- snapApplyMsg
-		rf.mu.Lock()
 
-		if rf.lastApplied < rf.lastIncludedIndex {
-			//fmt.Printf("Node %v: LI update to %v from installSP, logs = %v\n", rf.me, rf.lastIncludedIndex, rf.logs)
-			rf.lastApplied = rf.lastIncludedIndex
-		}
-		if rf.commitIndex < rf.lastIncludedIndex {
-			rf.commitIndex = rf.lastIncludedIndex
-		}
+		//rf.mu.Unlock()
+		//rf.applyCh <- snapApplyMsg
+		//rf.mu.Lock()
+
+		rf.applySnapshotCh <- snapApplyMsg
+
+		//if rf.lastApplied < rf.lastIncludedIndex {
+		//	//fmt.Printf("Node %v: LI update to %v from installSP, logs = %v\n", rf.me, rf.lastIncludedIndex, rf.logs)
+		//	rf.lastApplied = rf.lastIncludedIndex
+		//}
+		//if rf.commitIndex < rf.lastIncludedIndex {
+		//	rf.commitIndex = rf.lastIncludedIndex
+		//}
 
 		rf.mu.Unlock()
 	} else {
@@ -928,14 +936,52 @@ func (rf *Raft) applyLoop() {
 					Command:      entry.Command,
 					CommandIndex: entry.Index,
 				}
-				rf.applyCh <- msg
-				rf.mu.Lock()
-				rf.lastApplied = entry.Index
-				rf.mu.Unlock()
+				rf.applyEntryCh <- msg
+				//rf.applyCh <- msg
+				//rf.mu.Lock()
+				//rf.lastApplied = entry.Index
+				//rf.mu.Unlock()
+
 				//fmt.Printf("Node %v: apply index %v \n", rf.me, msg.CommandIndex)
 			}
 		} else {
 			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) applier() {
+	for {
+		select {
+		case msg := <-rf.applyEntryCh:
+			rf.mu.Lock()
+			if msg.CommandIndex > rf.lastApplied {
+				rf.mu.Unlock()
+				rf.applyCh <- msg
+				rf.mu.Lock()
+				rf.lastApplied = msg.CommandIndex
+				rf.mu.Unlock()
+			} else {
+				rf.mu.Unlock()
+			}
+		case msg := <-rf.applySnapshotCh:
+			rf.mu.Lock()
+			if msg.SnapshotIndex > rf.lastApplied {
+				rf.mu.Unlock()
+				rf.applyCh <- msg
+				rf.mu.Lock()
+
+				if rf.lastApplied < rf.lastIncludedIndex {
+					//fmt.Printf("Node %v: LI update to %v from installSP, logs = %v\n", rf.me, rf.lastIncludedIndex, rf.logs)
+					rf.lastApplied = rf.lastIncludedIndex
+				}
+				if rf.commitIndex < rf.lastIncludedIndex {
+					rf.commitIndex = rf.lastIncludedIndex
+				}
+				rf.mu.Unlock()
+			} else {
+				rf.mu.Unlock()
+			}
 		}
 	}
 }
