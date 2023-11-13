@@ -922,7 +922,7 @@ func (rf *Raft) applyLoop() {
 	for {
 		time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
-		if rf.commitIndex > rf.lastApplied {
+		if rf.commitIndex > rf.lastApplied && rf.lastApplied >= rf.lastIncludedIndex {
 			if rf.lastApplied+1-rf.lastIncludedIndex < 0 {
 				//fmt.Printf("Node %v: ERROR. LA = %v, LI = %v, logs = %v\n", rf.me, rf.lastApplied, rf.lastIncludedIndex, rf.logs)
 			}
@@ -937,10 +937,6 @@ func (rf *Raft) applyLoop() {
 					CommandIndex: entry.Index,
 				}
 				rf.applyEntryCh <- msg
-				//rf.applyCh <- msg
-				//rf.mu.Lock()
-				//rf.lastApplied = entry.Index
-				//rf.mu.Unlock()
 
 				//fmt.Printf("Node %v: apply index %v \n", rf.me, msg.CommandIndex)
 			}
